@@ -61,6 +61,17 @@ def validate_config(config: dict) -> None:
         raise ValueError("training.learning_rate 必须大于 0")
     if int(config["training"]["epochs"]) < 1:
         raise ValueError("training.epochs 必须大于 0")
+    if config["model"]["name"] == "dit":
+        if "sampling" not in config:
+            raise KeyError("类别条件 DiT 配置缺少 sampling 字段")
+        dit_config = config["model"]["dit"]
+        if int(dit_config["num_classes"]) < 1:
+            raise ValueError("model.dit.num_classes 必须大于 0")
+        class_dropout_prob = float(dit_config["class_dropout_prob"])
+        if not 0.0 <= class_dropout_prob <= 1.0:
+            raise ValueError("model.dit.class_dropout_prob 必须在 [0,1] 内")
+        if float(config["sampling"]["cfg_scale"]) < 0:
+            raise ValueError("sampling.cfg_scale 必须大于等于 0")
 
 
 def resolve_device(device_name: str) -> torch.device:

@@ -30,6 +30,8 @@ def build_model(model_config: dict, image_size: int) -> nn.Module:
             num_heads=int(dit_config["num_heads"]),
             mlp_ratio=float(dit_config["mlp_ratio"]),
             dropout=float(dit_config["dropout"]),
+            num_classes=int(dit_config["num_classes"]),
+            class_dropout_prob=float(dit_config["class_dropout_prob"]),
         )
 
     raise ValueError(f"未知模型 {model_name!r}，可选值为 'unet' 或 'dit'")

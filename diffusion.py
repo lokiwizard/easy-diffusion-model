@@ -35,7 +35,7 @@ def _extract(values: torch.Tensor, timesteps: torch.Tensor, x_shape: Sequence[in
 class GaussianDiffusion(nn.Module):
     """固定线性 beta 调度的 DDPM。
 
-    该类没有可训练参数。神经网络只负责 model(x_t, t)，扩散公式集中在这里，
+    该类没有可训练参数。神经网络负责 model(x_t, t, y)，扩散公式与 CFG 集中在这里，
     便于对照公式理解四种预测目标之间的关系。
     """
 
@@ -146,11 +146,18 @@ class GaussianDiffusion(nn.Module):
         model: nn.Module,
         clean_images: torch.Tensor,
         timesteps: torch.Tensor,
+        class_labels: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """计算一个 batch 的简化 DDPM 均方误差损失。"""
         noisy_images, noise = self.q_sample(clean_images, timesteps)  # 各 [B,3,H,W]
         target = self.training_target(clean_images, noise, timesteps)  # [B,3,H,W]
-        prediction = model(noisy_images, timesteps)  # [B,3,H,W]
+        prediction = self._model_prediction(
+            model,
+            noisy_images,
+            timesteps,
+            class_labels=class_labels,
+            cfg_scale=1.0,
+        )
         if prediction.shape != target.shape:
             raise RuntimeError(
                 f"模型输出 shape {tuple(prediction.shape)} 与目标 {tuple(target.shape)} 不同"
@@ -194,15 +201,48 @@ class GaussianDiffusion(nn.Module):
             return a * noisy_images - b * model_output
         return (noisy_images + b.square() * model_output) / a.clamp(min=1e-8)
 
+    def _model_prediction(
+        self,
+        model: nn.Module,
+        noisy_images: torch.Tensor,
+        timesteps: torch.Tensor,
+        class_labels: torch.Tensor | None,
+        cfg_scale: float,
+    ) -> torch.Tensor:
+        """计算模型输出；有类别时可组合条件与无条件预测。
+
+        CFG 直接作用于模型所选的预测参数化：
+            prediction = unconditional
+                         + cfg_scale * (conditional - unconditional)
+        """
+        if cfg_scale < 0:
+            raise ValueError("cfg_scale 必须大于等于 0")
+        if class_labels is None:
+            return model(noisy_images, timesteps)
+
+        conditional = model(noisy_images, timesteps, class_labels)
+        if cfg_scale == 1.0:
+            return conditional
+        unconditional = model(noisy_images, timesteps, None)
+        return unconditional + cfg_scale * (conditional - unconditional)
+
     @torch.no_grad()
     def p_sample(
         self,
         model: nn.Module,
         noisy_images: torch.Tensor,
         timesteps: torch.Tensor,
+        class_labels: torch.Tensor | None = None,
+        cfg_scale: float = 1.0,
     ) -> torch.Tensor:
         """执行一步 x_t -> x_{t-1}，输入输出均为 [B,3,H,W]。"""
-        model_output = model(noisy_images, timesteps)  # [B,3,H,W]
+        model_output = self._model_prediction(
+            model,
+            noisy_images,
+            timesteps,
+            class_labels=class_labels,
+            cfg_scale=cfg_scale,
+        )
         predicted_x0 = self.model_output_to_x0(
             noisy_images, timesteps, model_output
         ).clamp(-1.0, 1.0)  # [B,3,H,W]
@@ -226,8 +266,21 @@ class GaussianDiffusion(nn.Module):
         shape: tuple[int, int, int, int],
         device: torch.device,
         show_progress: bool = True,
+        *,
+        class_labels: torch.Tensor | None = None,
+        cfg_scale: float = 1.0,
     ) -> torch.Tensor:
-        """从 x_T~N(0,I) 开始逐步采样，最终返回 [B,3,H,W]、范围约 [-1,1]。"""
+        """从 x_T~N(0,I) 逐步采样，可选类别标签和 CFG。"""
+        if class_labels is not None:
+            if class_labels.shape != (shape[0],):
+                raise ValueError(
+                    f"class_labels 应为 shape {(shape[0],)}，实际为 {tuple(class_labels.shape)}"
+                )
+            if class_labels.device != device:
+                raise ValueError("class_labels 与采样设备必须一致")
+        if cfg_scale < 0:
+            raise ValueError("cfg_scale 必须大于等于 0")
+
         was_training = model.training
         model.eval()
         images = torch.randn(shape, device=device)  # x_T: [B,3,H,W]
@@ -239,7 +292,13 @@ class GaussianDiffusion(nn.Module):
             timesteps = torch.full(
                 (shape[0],), step, device=device, dtype=torch.long
             )  # [B]
-            images = self.p_sample(model, images, timesteps)  # [B,3,H,W]
+            images = self.p_sample(
+                model,
+                images,
+                timesteps,
+                class_labels=class_labels,
+                cfg_scale=cfg_scale,
+            )
 
         if was_training:
             model.train()

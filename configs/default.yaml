@@ -24,12 +24,17 @@ model:
     num_heads: 6
     mlp_ratio: 4.0
     dropout: 0.0
+    num_classes: 10
+    class_dropout_prob: 0.1      # 训练时替换为空类别的概率，供 CFG 学习无条件分支
 
 diffusion:
   timesteps: 1000
   beta_start: 0.0001
   beta_end: 0.02
   pred_type: epsilon           # epsilon / x0 / v / score
+
+sampling:
+  cfg_scale: 4.0              # 1.0 表示无引导；仅类别条件 DiT 使用
 
 training:
   epochs: 100

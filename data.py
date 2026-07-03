@@ -1,4 +1,4 @@
-"""ImageNet-10 数据读取。类别标签会读取但训练时不使用。"""
+"""ImageFolder 数据读取。类别标签可作为 DiT 的生成条件。"""
 
 import random
 from pathlib import Path
@@ -32,7 +32,7 @@ def build_dataloader(
 
     每个 batch 返回：
         images: [B, 3, H, W]，float32，范围 [-1, 1]
-        labels: [B]，类别编号；本项目做无条件生成，因此训练时忽略它
+        labels: [B]，ImageFolder 按类别目录名排序得到的类别编号
     """
     configured_path = Path(dataset_config["path"]).expanduser()
     dataset_path = (

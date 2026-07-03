@@ -76,6 +76,7 @@ def save_checkpoint(
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
     config: dict,
+    class_names: list[str],
     epoch: int,
     global_step: int,
 ) -> None:
@@ -86,6 +87,7 @@ def save_checkpoint(
             "optimizer": optimizer.state_dict(),
             "scaler": scaler.state_dict(),
             "config": config,
+            "class_names": class_names,
             "epoch": epoch,
             "global_step": global_step,
         },
@@ -99,14 +101,26 @@ def load_checkpoint(
     optimizer: torch.optim.Optimizer,
     scaler: torch.amp.GradScaler,
     current_config: dict,
+    current_class_names: list[str],
 ) -> tuple[int, int]:
     """恢复模型与优化器，返回 (下一个 epoch, 已完成 step 数)。"""
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
     saved_config = checkpoint["config"]
 
-    # 这些配置会改变张量 shape 或目标定义，断点训练时必须完全一致。
+    model_name = current_config["model"]["name"]
+    # 只比较当前启用的模型配置；修改未启用模型不应阻止安全恢复。
     critical_pairs = [
-        ("model", saved_config["model"], current_config["model"]),
+        ("model.name", saved_config["model"]["name"], model_name),
+        (
+            "model.in_channels",
+            saved_config["model"]["in_channels"],
+            current_config["model"]["in_channels"],
+        ),
+        (
+            f"model.{model_name}",
+            saved_config["model"][model_name],
+            current_config["model"][model_name],
+        ),
         (
             "dataset.image_size",
             saved_config["dataset"]["image_size"],
@@ -117,6 +131,9 @@ def load_checkpoint(
     for name, saved_value, current_value in critical_pairs:
         if saved_value != current_value:
             raise ValueError(f"断点中的 {name} 与当前配置不同，不能安全恢复训练")
+    saved_class_names = checkpoint.get("class_names")
+    if saved_class_names is not None and saved_class_names != current_class_names:
+        raise ValueError("断点中的类别名称或顺序与当前数据集不同，不能安全恢复训练")
 
     model.load_state_dict(checkpoint["model"])
     optimizer.load_state_dict(checkpoint["optimizer"])
@@ -136,8 +153,19 @@ def main() -> None:
     dataloader, dataset_path = build_dataloader(config["dataset"], seed, device)
     if len(dataloader) == 0:
         raise RuntimeError("batch_size 大于数据集大小，导致没有可训练的 batch")
+    class_names = list(dataloader.dataset.classes)
+    is_class_conditional = config["model"]["name"] == "dit"
+    if is_class_conditional:
+        configured_num_classes = int(config["model"]["dit"]["num_classes"])
+        if len(class_names) != configured_num_classes:
+            raise ValueError(
+                "model.dit.num_classes 与数据集类别数不一致："
+                f"配置为 {configured_num_classes}，数据集为 {len(class_names)}"
+            )
     print_training_config(config, device, dataset_path)
-    print(f"读取到 {len(dataloader.dataset):,} 张图像、{len(dataloader.dataset.classes)} 个目录类别")
+    print(f"读取到 {len(dataloader.dataset):,} 张图像、{len(class_names)} 个目录类别")
+    if is_class_conditional:
+        print("类别映射：" + ", ".join(f"{index}={name}" for index, name in enumerate(class_names)))
 
     image_size = int(config["dataset"]["image_size"])
     model = build_model(config["model"], image_size).to(device)
@@ -167,7 +195,12 @@ def main() -> None:
             raise FileNotFoundError(f"找不到断点：{checkpoint_path}")
         run_directory = checkpoint_path.parent
         start_epoch, global_step = load_checkpoint(
-            checkpoint_path, model, optimizer, scaler, config
+            checkpoint_path,
+            model,
+            optimizer,
+            scaler,
+            config,
+            class_names,
         )
         print(f"已从 {checkpoint_path} 恢复，将从 epoch {start_epoch + 1} 继续")
     else:
@@ -201,9 +234,14 @@ def main() -> None:
         steps_in_epoch = 0
         progress = tqdm(dataloader, desc=f"Epoch {epoch + 1}/{epochs}")
 
-        for clean_images, _labels in progress:
-            # clean_images/x_0: [B,3,H,W]，值域 [-1,1]。类别标签不用于无条件 DDPM。
+        for clean_images, labels in progress:
+            # clean_images/x_0: [B,3,H,W]，值域 [-1,1]。
             clean_images = clean_images.to(device, non_blocking=True)
+            class_labels = (
+                labels.to(device, non_blocking=True)
+                if is_class_conditional
+                else None
+            )
             batch_size = clean_images.shape[0]
             # 每张图独立均匀抽一个时间步；timesteps shape 为 [B]。
             timesteps = torch.randint(
@@ -221,7 +259,12 @@ def main() -> None:
                 dtype=torch.float16,
                 enabled=use_amp,
             ):
-                loss = diffusion.training_loss(model, clean_images, timesteps)  # 标量
+                loss = diffusion.training_loss(
+                    model,
+                    clean_images,
+                    timesteps,
+                    class_labels=class_labels,
+                )
 
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -263,6 +306,7 @@ def main() -> None:
             optimizer,
             scaler,
             config,
+            class_names,
             epoch,
             global_step,
         )
@@ -274,6 +318,7 @@ def main() -> None:
                 optimizer,
                 scaler,
                 config,
+                class_names,
                 epoch,
                 global_step,
             )
@@ -287,7 +332,19 @@ def main() -> None:
                 image_size,
                 image_size,
             )
-            samples = diffusion.sample(model, sample_shape, device)  # [B,3,H,W]
+            sample_labels = None
+            cfg_scale = 1.0
+            if is_class_conditional:
+                sample_labels = torch.arange(sample_count, device=device)
+                sample_labels = sample_labels % len(class_names)
+                cfg_scale = float(config["sampling"]["cfg_scale"])
+            samples = diffusion.sample(
+                model,
+                sample_shape,
+                device,
+                class_labels=sample_labels,
+                cfg_scale=cfg_scale,
+            )
             save_image_grid(samples, run_directory / f"samples_epoch_{epoch + 1:04d}.png")
 
     elapsed_minutes = (time.time() - training_start_time) / 60.0

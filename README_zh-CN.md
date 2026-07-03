@@ -4,8 +4,9 @@
 
 这是一个面向扩散模型初学者的 PyTorch DDPM 项目。它支持：
 
-- 两种模型：卷积 `UNet`、简化版 `DiT`
+- 两种模型：无条件卷积 `UNet`、类别条件 AdaLN-Zero `DiT`
 - 四种预测目标：`epsilon`、`x0`、`v`、`score`
+- DiT 的 classifier-free guidance（CFG）采样
 - YAML 配置、命令行单项覆盖、断点续训
 
 
@@ -54,8 +55,9 @@ pip install -r requirements.txt
 └── ...
 ```
 
-`torchvision.datasets.ImageFolder` 会识别类别子目录。当前项目训练无条件生成模型，
-因此读取到的类别标签不会送入网络。路径不同可修改 YAML 的 `dataset.path`。
+`torchvision.datasets.ImageFolder` 会按类别目录名排序并生成类别 ID。选择 DiT 时，这些
+类别 ID 会作为生成条件；选择 UNet 时仍训练无条件模型。路径不同可修改 YAML 的
+`dataset.path`。
 
 ## 4. CPU 小规模运行
 
@@ -109,6 +111,11 @@ uv run python train.py --config configs/default.yaml --set diffusion.pred_type=s
 uv run python train.py --config configs/default.yaml --set model.name=dit
 ```
 
+DiT 使用 `time_embedding + class_embedding` 驱动每层 AdaLN-Zero。配置中的
+`model.dit.num_classes` 必须与 ImageFolder 的类别目录数一致；训练时
+`model.dit.class_dropout_prob` 比例的标签会被替换为空类别，使模型学会 CFG 所需的
+无条件分支。类别 ID 与目录名的映射会在训练开始时打印并保存在 checkpoint 中。
+
 多个参数可连续覆盖。例如先用 GPU 做 10 step 快速检查：
 
 ```bash
@@ -136,8 +143,8 @@ b_t = sqrt(1 - alpha_bar_t)
 epsilon ~ N(0, I)
 ```
 
-网络始终输入 `x_t: [B,3,H,W]` 和 `t: [B]`，输出也是 `[B,3,H,W]`，但输出含义由
-`pred_type` 决定：
+网络始终输入 `x_t: [B,3,H,W]` 和 `t: [B]`；DiT 还输入 `y: [B]` 类别 ID。输出
+都是 `[B,3,H,W]`，但输出含义由 `pred_type` 决定：
 
 | `pred_type` | 训练目标 | 从输出恢复 `x0` |
 |---|---|---|
@@ -157,6 +164,21 @@ uv run python sample.py \
   --num-images 16 \
   --output samples.png
 ```
+
+类别条件 DiT 可使用类别 ID 或类别目录名：
+
+```bash
+uv run python sample.py \
+  --checkpoint runs/dit_epsilon_xxx/last.pt \
+  --num-images 8 \
+  --class-labels n02085936 \
+  --cfg-scale 4.0 \
+  --output class_samples.png
+```
+
+单个类别会应用到全部图像；也可传入与图像数相同的逗号分隔类别，例如
+`--class-labels 0,0,1,1`。省略该参数时会依次循环所有类别。CFG 使用
+`uncond + cfg_scale * (cond - uncond)`；`cfg_scale=1.0` 表示仅使用条件预测。
 
 采样从 `[B,3,H,W]` 标准高斯噪声开始，执行配置中的全部 DDPM 时间步。默认 1000 步
 强调公式清晰而非采样速度，因此生成会比 DDIM 等加速采样器慢。

@@ -4,8 +4,10 @@ English | [简体中文](README_zh-CN.md)
 
 A beginner-friendly PyTorch project for training a DDPM image generation model. It supports:
 
-- Two model architectures: a convolutional `UNet` and a simplified `DiT`
+- Two model architectures: an unconditional convolutional `UNet` and a class-conditional
+  AdaLN-Zero `DiT`
 - Four prediction targets: `epsilon`, `x0`, `v`, and `score`
+- Classifier-free guidance (CFG) sampling for DiT
 - YAML configuration, command-line overrides, and checkpoint resumption
 
 
@@ -54,9 +56,9 @@ The default configuration expects `datasets/imagenet-10` in the parent directory
 └── ...
 ```
 
-`torchvision.datasets.ImageFolder` discovers classes from the subdirectories. This project trains
-an unconditional model, so the class labels are loaded but not passed to the network. Change
-`dataset.path` in the YAML file if your dataset is stored elsewhere.
+`torchvision.datasets.ImageFolder` sorts class directory names and assigns class IDs. DiT uses
+these IDs as generation conditions, while UNet remains unconditional. Change `dataset.path` in the
+YAML file if your dataset is stored elsewhere.
 
 ## 4. Small CPU Run
 
@@ -110,6 +112,12 @@ Switch to DiT:
 uv run python train.py --config configs/default.yaml --set model.name=dit
 ```
 
+DiT uses `time_embedding + class_embedding` to drive AdaLN-Zero in every block.
+`model.dit.num_classes` must match the number of ImageFolder class directories.
+`model.dit.class_dropout_prob` replaces a fraction of labels with the null class during training,
+which teaches the unconditional branch required by CFG. The class ID mapping is printed at startup
+and stored in each checkpoint.
+
 Multiple overrides can be combined. For example, run ten DiT optimization steps on a GPU:
 
 ```bash
@@ -137,8 +145,8 @@ b_t = sqrt(1 - alpha_bar_t)
 epsilon ~ N(0, I)
 ```
 
-The network always receives `x_t: [B,3,H,W]` and `t: [B]`, and returns `[B,3,H,W]`. The meaning of
-that output depends on `pred_type`:
+The network always receives `x_t: [B,3,H,W]` and `t: [B]`; DiT additionally receives class IDs
+`y: [B]`. Both models return `[B,3,H,W]`. The meaning of that output depends on `pred_type`:
 
 | `pred_type` | Training target | Recovering `x0` from the output |
 |---|---|---|
@@ -159,6 +167,21 @@ uv run python sample.py \
   --num-images 16 \
   --output samples.png
 ```
+
+For a class-conditional DiT, pass either a class ID or its directory name:
+
+```bash
+uv run python sample.py \
+  --checkpoint runs/dit_epsilon_xxx/last.pt \
+  --num-images 8 \
+  --class-labels n02085936 \
+  --cfg-scale 4.0 \
+  --output class_samples.png
+```
+
+A single class is repeated for every image. You may instead provide one comma-separated class per
+image, such as `--class-labels 0,0,1,1`. When omitted, labels cycle over all classes. CFG computes
+`uncond + cfg_scale * (cond - uncond)`; `cfg_scale=1.0` uses only the conditional prediction.
 
 Sampling starts from standard Gaussian noise with shape `[B,3,H,W]` and executes every configured
 DDPM reverse step. The default 1,000-step process prioritizes a clear implementation over speed, so
