@@ -8,8 +8,6 @@ A beginner-friendly PyTorch project for training a DDPM image generation model. 
 - Four prediction targets: `epsilon`, `x0`, `v`, and `score`
 - YAML configuration, command-line overrides, and checkpoint resumption
 
-The implementation favors explicit formulas, tensor shapes, and a readable training flow over
-heavy abstractions.
 
 ## 1. Project Structure
 
