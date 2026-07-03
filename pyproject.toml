@@ -1,0 +1,23 @@
+[project]
+name = "easy-diffusion-model"
+version = "0.1.0"
+description = "A beginner-friendly PyTorch DDPM supporting epsilon, x0, v, and score prediction"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "pyyaml>=6.0",
+    "torch==2.11.0",
+    "torchvision==0.26.0",
+    "tqdm>=4.66",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu126" }
+torchvision = { index = "pytorch-cu126" }
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
